@@ -17,6 +17,8 @@ BREAKOUT_PRIOR_MOVE_PCT = 30.0      # prior move over 60 trading days before the
 BASE_MIN_DAYS, BASE_MAX_DAYS = 10, 40
 BASE_NEAR_HIGH_PCT = 5.0            # within this % of the base high = breakout-ready
 CHASE_ATR = 4.0                     # > 4 ATR above the 50 = don't chase
+CORP_ACTION_CHG_PCT = 40.0          # a 40%+ day that is also CORP_ACTION_ATR from the 50 = unadjusted split / spin-off, skip
+CORP_ACTION_ATR = 8.0
 
 # ---- output ----
 MAX_SETUPS_PER_SIDE = 12

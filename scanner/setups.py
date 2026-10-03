@@ -46,6 +46,12 @@ def indicators(df: pd.DataFrame) -> dict | None:
     )
     # ------------------------------------------------------------- setups
     setups = []
+    # sanity: a one-day move over 40% that also lands 8+ ATR from the 50 is a split / spin-off the feed has
+    # not adjusted (CTVA 2026-10-02 showed -85%), not a setup. Skip the name outright.
+    if abs(d["chg_pct"]) >= C.CORP_ACTION_CHG_PCT and abs(d["ext_atr50"]) >= C.CORP_ACTION_ATR:
+        d["setups"] = []
+        d["corp_action"] = True
+        return d
     prev_c = float(c.iloc[-2])
     rng_pos = (px - d["low_today"]) / (d["high_today"] - d["low_today"]) if d["high_today"] > d["low_today"] else 0.5
     vol_ep = d["rvol"] >= C.EP_VOL_MULT
