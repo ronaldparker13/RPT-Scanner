@@ -169,20 +169,33 @@ def build_html(reg, groups, setups, universe, run_date, note=""):
 
 # ------------------------------------------------------------------ discord
 def discord_post(webhook, reg, setups, groups, page_url, run_date):
+    """One Discord embed: colored by regime, two monospaced tables, title links to the page."""
     if not webhook:
         return
+    color = {"green": 0x2ecc71, "yellow": 0xf1c40f, "red": 0xff5252}[reg["color"]]
     emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}[reg["color"]]
-    lines = [f"**RPT Scanner · {run_date}** {emoji} {reg['label']} · above 50-day {reg['pct_above_50']:.0f}% · up4 {reg['up4']} / down4 {reg['down4']}",
-             "Top groups: " + ", ".join(groups.head(5)["industry"].tolist())]
-    for side, head in (("long", "**Longs**"), ("short", "**Shorts**")):
-        sub = setups[setups.side == side].head(8) if not setups.empty else setups
+    nice = dt.datetime.strptime(run_date, "%Y-%m-%d").strftime("%b %-d")
+    short = {"SECOND_CHANCE": "2ND CHANCE", "BREAKOUT_READY": "BO READY"}
+    lead = ", ".join(SECTOR_NAMES.get(k, k) for k, _ in reg["sectors"][:3])
+    desc = (f"**{reg['pct_above_50']:.0f}%** above the 50-day · up 4%+ **{reg['up4']}** / down 4%+ **{reg['down4']}**\n"
+            f"Sectors leading: {lead}\nTop groups: {', '.join(groups.head(4)['industry'].tolist())}")
+    fields = []
+    for side, head in (("long", "Longs"), ("short", "Shorts")):
+        sub = setups[setups.side == side].head(6) if not setups.empty else setups
         if sub.empty:
             continue
-        lines.append(head)
+        lines = []
         for _, r in sub.iterrows():
-            lines.append(f"`{r['symbol']:<6}` {r['setup'].replace('_',' '):<14} lvl {r['level']:.2f} · stop {r['stop']:.2f} · ADR {r['adr']:.1f}% · RVOL {r['rvol']:.1f}x{' ⚠️ extended' if r['chase'] else ''}")
-    lines.append(f"Full page: {page_url}")
+            tag = short.get(r["setup"], r["setup"])
+            warn = " !" if r["chase"] else ""
+            lines.append(f"{r['symbol']:<5} {tag:<10} {r['level']:>8.2f}  stop {r['stop']:>8.2f}  {r['rvol']:>4.1f}x{warn}")
+        fields.append({"name": head, "value": "```\n" + "\n".join(lines) + "\n```", "inline": False})
+    if not fields:
+        fields.append({"name": "Setups", "value": "Nothing qualified today.", "inline": False})
+    embed = {"title": f"{emoji} RPT Scanner · {nice} · {reg['label']}", "url": page_url or None, "color": color,
+             "description": desc, "fields": fields,
+             "footer": {"text": "lvl = the price that matters · stop = low/high of the day · x = RVOL · ! = extended, don't chase · tap the title for the full page"}}
     try:
-        requests.post(webhook, json={"content": "\n".join(lines)[:1900]}, timeout=20)
+        requests.post(webhook, json={"embeds": [embed]}, timeout=20)
     except Exception as ex:
         print("discord post failed:", ex)
