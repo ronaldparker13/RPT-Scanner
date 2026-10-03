@@ -18,7 +18,7 @@ import pandas as pd
 from scanner import config as C
 from scanner import data as D
 from scanner.setups import indicators
-from scanner.report import regime, group_rank, setup_rows, build_html, discord_post
+from scanner.report import regime, group_rank, setup_rows, build_html, build_watchlist, discord_post
 
 
 def main():
@@ -75,6 +75,8 @@ def main():
     out = dict(date=run_date, regime={k: v for k, v in reg.items() if k != "sectors"}, sectors=reg["sectors"],
                groups=groups.head(C.TOP_GROUPS).to_dict("records"),
                setups=setups.to_dict("records") if not setups.empty else [])
+    with open("docs/watchlist.txt", "w", encoding="utf-8") as f:
+        f.write(build_watchlist(setups, groups, run_date))
     with open("docs/latest.json", "w", encoding="utf-8") as f:
         json.dump(out, f, default=str, indent=1)
     page_url = os.environ.get("PAGE_URL", "")
