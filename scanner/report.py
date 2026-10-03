@@ -3,6 +3,7 @@ import datetime as dt
 import html
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -62,7 +63,7 @@ def group_rank(universe: pd.DataFrame, stats: dict) -> pd.DataFrame:
     df = pd.DataFrame(rows).merge(universe[["symbol", "industry"]], on="symbol")
     g = df.groupby("industry").agg(members=("symbol", "count"), rs_1m=("rs_1m", "median"), rs_3m=("rs_3m", "median"),
                                    pct_hi20=("hi20", "mean"), pct_a50=("a50", "mean")).reset_index()
-    g = g[g["members"] >= 3]
+    g = g[g["members"] >= C.MIN_GROUP_MEMBERS]
     g["pct_hi20"] *= 100
     g["pct_a50"] *= 100
     g["score"] = g["rs_1m"].rank(pct=True) * 40 + g["pct_hi20"].rank(pct=True) * 40 + g["pct_a50"].rank(pct=True) * 20
@@ -74,13 +75,14 @@ def setup_rows(universe: pd.DataFrame, stats: dict, exchanges: dict, top_groups:
     from .setups import score
     meta = universe.set_index("symbol")
     rows = []
+    junk = re.compile(r"\b(Common Stock|Class [A-C] Common Stock|Class [A-C]|Ordinary Shares|Inc\.?|Incorporated|Corporation|Corp\.?|Ltd\.?|Limited|plc|Holdings|Co\.)\b.*$", re.I)
     for s, d in stats.items():
         for st in d["setups"]:
             kind, side, level, stop = st
             sc = score(st, d)
             if meta.loc[s, "industry"] in top_groups:
                 sc += 10
-            rows.append(dict(symbol=s, exchange=exchanges.get(s, meta.loc[s, "exchange"]), name=meta.loc[s, "name"],
+            rows.append(dict(symbol=s, exchange=exchanges.get(s, meta.loc[s, "exchange"]), name=junk.sub("", str(meta.loc[s, "name"])).strip(" ,.") or str(meta.loc[s, "name"]),
                              industry=meta.loc[s, "industry"], setup=kind, side=side, score=sc,
                              price=d["price"], level=level, stop=stop, risk_pct=abs(d["price"] - stop) / d["price"] * 100,
                              adr=d["adr_pct"], rvol=d["rvol"], chg=d["chg_pct"], ext=d["ext_atr50"],

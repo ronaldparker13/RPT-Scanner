@@ -88,9 +88,10 @@ def indicators(df: pd.DataFrame) -> dict | None:
             lvl_long, lvl_days = float(cc), k
         if (was_eps or was_hvcs) and lvl_short is None:
             lvl_short = float(cc)
-    if healthy and lvl_long and abs(px / lvl_long - 1) * 100 <= C.SECOND_CHANCE_PCT and not ep_long and not hvc_long and d["rvol"] < C.HVC_VOL_MULT:
+    # long: price holding at / just above the level (-1% .. +SECOND_CHANCE_PCT); short: at / just below it
+    if healthy and lvl_long and -1.0 <= (px / lvl_long - 1) * 100 <= C.SECOND_CHANCE_PCT and not ep_long and not hvc_long and d["rvol"] < C.HVC_VOL_MULT:
         setups.append(("SECOND_CHANCE", "long", lvl_long, min(d["low_today"], lvl_long * 0.98)))
-    if (not healthy) and lvl_short and abs(px / lvl_short - 1) * 100 <= C.SECOND_CHANCE_PCT and not ep_short and not hvc_short and d["rvol"] < C.HVC_VOL_MULT:
+    if (not healthy) and lvl_short and -C.SECOND_CHANCE_PCT <= (px / lvl_short - 1) * 100 <= 1.0 and not ep_short and not hvc_short and d["rvol"] < C.HVC_VOL_MULT:
         setups.append(("SECOND_CHANCE", "short", lvl_short, max(d["high_today"], lvl_short * 1.02)))
 
     # Breakout-ready / breakout (long only): prior move then a tight base riding the 10/20

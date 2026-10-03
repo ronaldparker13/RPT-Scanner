@@ -21,4 +21,5 @@ CHASE_ATR = 4.0                     # > 4 ATR above the 50 = don't chase
 # ---- output ----
 MAX_SETUPS_PER_SIDE = 12
 TOP_GROUPS = 10
+MIN_GROUP_MEMBERS = 6               # a group needs this many qualified members to be ranked
 REPORT_TITLE = "RPT Scanner"
