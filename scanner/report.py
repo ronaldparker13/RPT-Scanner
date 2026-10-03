@@ -114,8 +114,31 @@ a.t{color:var(--cyn);font-weight:700;text-decoration:none}a.t:hover{text-decorat
 .EP{background:var(--ora)}.HVC{background:var(--pur)}.SECOND_CHANCE{background:var(--cyn)}.BREAKOUT{background:var(--grn)}.BREAKOUT_READY{background:#9ccc65}
 .short .tag{background:var(--red)}.chase{color:var(--red);font-weight:700}.grp{color:var(--mut);font-size:12px}
 .scroll{overflow-x:auto}.foot{color:var(--mut);font-size:12px;margin-top:20px}
+.open{margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px;color:var(--mut)}
+.open button{background:#23262d;color:var(--txt);border:1px solid #2e323a;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px}
+.open button.on{background:var(--cyn);color:#000;border-color:var(--cyn)}
 @media(max-width:700px){td,th{padding:6px 7px;font-size:13px}}
 """
+
+
+JS = """<script>
+(function(){
+  var KEY='rpt_open_mode';var mode='browser';
+  try{mode=localStorage.getItem(KEY)||'browser';}catch(e){}
+  var bB=document.getElementById('mBrowser'),bA=document.getElementById('mApp');
+  function paint(){bB.className=mode==='browser'?'on':'';bA.className=mode==='app'?'on':'';}
+  bB.onclick=function(){mode='browser';try{localStorage.setItem(KEY,mode);}catch(e){}paint();};
+  bA.onclick=function(){mode='app';try{localStorage.setItem(KEY,mode);}catch(e){}paint();};
+  paint();
+  document.querySelectorAll('a.t').forEach(function(a){
+    a.addEventListener('click',function(ev){
+      if(mode!=='app')return;              /* browser: the named tab 'tradingview' is reused by the link itself */
+      ev.preventDefault();
+      window.location.href='tradingview://chart?symbol='+a.getAttribute('data-sym');
+    });
+  });
+})();
+</script>"""
 
 
 def fmt_dollar(v):
@@ -133,7 +156,8 @@ def build_html(reg, groups, setups, universe, run_date, note=""):
              f"<div class='strip'><span class='pill {reg['color']}'>{reg['label']}</span>",
              f"<span class='kv'>{idx}</span>",
              f"<span class='kv'>Above 50-day: <b>{reg['pct_above_50']:.0f}%</b> · Above 200: <b>{reg['pct_above_200']:.0f}%</b> · Up 4%+: <b>{reg['up4']}</b> / Down 4%+: <b>{reg['down4']}</b></span>",
-             f"<span class='kv'>Sectors 1w — leading: <b>{e(sec_top)}</b> · lagging: <b>{e(sec_bot)}</b> · offense {'leading' if reg['offense_leading'] else 'not leading'}</span></div>"]
+             f"<span class='kv'>Sectors 1w — leading: <b>{e(sec_top)}</b> · lagging: <b>{e(sec_bot)}</b> · offense {'leading' if reg['offense_leading'] else 'not leading'}</span>",
+             "<span class='open'>Open tickers in: <button id='mBrowser' class='on'>browser tab</button><button id='mApp'>desktop app</button></span></div>"]
     # groups
     parts.append("<h2>Top groups (1-month RS, % at 20-day highs, % above 50)</h2><div class='scroll'><table><tr><th>#</th><th>Group</th><th class='num'>Members</th><th class='num'>RS 1m</th><th class='num'>RS 3m</th><th class='num'>At 20d highs</th><th class='num'>Above 50</th></tr>")
     for i, r in groups.head(C.TOP_GROUPS).iterrows():
@@ -149,7 +173,7 @@ def build_html(reg, groups, setups, universe, run_date, note=""):
         for _, r in df.iterrows():
             chase = " <span class='chase'>DON'T CHASE</span>" if r["chase"] else ""
             star = " ★" if r["top_group"] else ""
-            parts.append(f"<tr class='{r['side']}'><td><a class='t' href='{tv_link(r['symbol'], r['exchange'])}' target='_blank'>{e(r['symbol'])}</a><div class='grp'>{e(str(r['name']))[:28]}</div></td>"
+            parts.append(f"<tr class='{r['side']}'><td><a class='t' href='{tv_link(r['symbol'], r['exchange'])}' target='tradingview' data-sym='{r['exchange']}:{r['symbol']}'>{e(r['symbol'])}</a><div class='grp'>{e(str(r['name']))[:28]}</div></td>"
                          f"<td><span class='tag {r['setup']}'>{r['setup'].replace('_',' ')}</span>{chase}</td>"
                          f"<td class='num'>{r['price']:.2f}</td><td class='num'>{r['level']:.2f}</td><td class='num'>{r['stop']:.2f}</td><td class='num'>{r['risk_pct']:.1f}%</td>"
                          f"<td class='num'>{r['adr']:.1f}%</td><td class='num'>{r['rvol']:.1f}x</td><td class='num'>{r['chg']:+.1f}%</td><td class='num'>{r['ext']:+.1f} ATR</td><td class='num'>{fmt_dollar(r['dollar_vol'])}</td><td class='grp'>{e(str(r['industry']))}{star}</td></tr>")
@@ -163,7 +187,8 @@ def build_html(reg, groups, setups, universe, run_date, note=""):
     parts.append("<h2>How to read it</h2><div class='kv'>EP = gap on volume that held (buy the opening-range high next session, stop the day's low). HVC = high-volume close near the high (buy the hold, stop the low). SECOND CHANCE = price back at a recent EP/HVC close on quiet volume (buy the reclaim, stop under the level). BREAKOUT READY = 30%+ run, tight base, within 5% of the base high (watch for the close through it). BREAKOUT = closed through the base high on volume today. ★ = in a top-10 group. Level = the price that matters; Stop = low/high of the day or just past the level; Risk = distance to the stop. Nothing here is a recommendation; it is a list of charts to open.</div>")
     if note:
         parts.append(f"<div class='foot'>{e(note)}</div>")
-    parts.append(f"<div class='foot'>RPT Scanner · rules mirror the RPT Stock Chart Pine · generated {dt.datetime.utcnow():%Y-%m-%d %H:%M} UTC</div></div></body></html>")
+    parts.append(f"<div class='foot'>RPT Scanner · rules mirror the RPT Stock Chart Pine · generated {dt.datetime.utcnow():%Y-%m-%d %H:%M} UTC</div></div>")
+    parts.append(JS + "</body></html>")
     return "".join(parts)
 
 
