@@ -140,3 +140,21 @@ def demo_bars(universe: pd.DataFrame, days=300, seed=7) -> dict:
         out[b] = pd.DataFrame({"Open": close, "High": close * 1.005, "Low": close * 0.995, "Close": close,
                                "Volume": rng.lognormal(18, 0.2, days)}, index=idx)
     return out
+
+
+def demo_futures(days=300, seed=11) -> dict:
+    from .futures import FUTURES
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
+    days = len(idx)
+    out = {}
+    for k, (sym, name, tv) in enumerate(FUTURES):
+        r = rng.normal(0.0003, 0.012, days)
+        if k % 5 == 1:   # waking market: vol expands and it breaks out over the last 15 days
+            r[-15:] = rng.normal(0.012, 0.03, 15)
+        close = 100 * np.exp(np.cumsum(r))
+        volume = rng.lognormal(12, 0.3, days)
+        if k % 5 == 1:
+            volume[-20:] *= 1.6
+        out[sym] = pd.DataFrame({"Open": close, "High": close * (1 + np.abs(rng.normal(0, 0.006, days))), "Low": close * (1 - np.abs(rng.normal(0, 0.006, days))), "Close": close, "Volume": volume}, index=idx)
+    return out

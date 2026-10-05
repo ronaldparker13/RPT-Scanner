@@ -18,7 +18,8 @@ import pandas as pd
 from scanner import config as C
 from scanner import data as D
 from scanner.setups import indicators
-from scanner.report import regime, group_rank, setup_rows, build_html, build_watchlist, discord_post
+from scanner.report import regime, group_rank, setup_rows, build_html, build_watchlist, discord_post, CSS
+from scanner import futures as F
 
 
 def main():
@@ -32,6 +33,7 @@ def main():
     if args.demo:
         universe = D.demo_universe()
         bars = D.demo_bars(universe)
+        fut_bars = D.demo_futures()
         exchanges = {}
         note = "DEMO DATA — synthetic bars, for layout only."
     else:
@@ -40,6 +42,7 @@ def main():
             universe = universe.sort_values("market_cap", ascending=False).head(args.limit)
         print(f"universe: {len(universe)} stocks ≥ ${C.MIN_MARKET_CAP/1e9:.0f}B")
         bars = D.fetch_bars(list(universe["symbol"]) + D.BENCHMARKS + D.SECTOR_ETFS)
+        fut_bars = D.fetch_bars([f[0] for f in F.FUTURES], days=400, batch=30)
         print(f"bars: {len(bars)} symbols in {time.time()-t0:.0f}s")
         exchanges = {}
         note = ""
@@ -67,20 +70,27 @@ def main():
     setups = setup_rows(universe, stats, exchanges, top)
 
     run_date = (bars[next(iter(bars))].index[-1]).strftime("%Y-%m-%d")
+    fut = F.in_play_table(fut_bars)
     page = build_html(reg, groups, setups, universe, run_date, note)
+    with open("docs/futures.html", "w", encoding="utf-8") as f:
+        f.write(F.build_page(fut, run_date, CSS, note))
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(page)
     with open(f"docs/history/{run_date}.html", "w", encoding="utf-8") as f:
         f.write(page)
     out = dict(date=run_date, regime={k: v for k, v in reg.items() if k != "sectors"}, sectors=reg["sectors"],
                groups=groups.head(C.TOP_GROUPS).to_dict("records"),
-               setups=setups.to_dict("records") if not setups.empty else [])
+               setups=setups.to_dict("records") if not setups.empty else [],
+               futures=fut.to_dict("records") if not fut.empty else [])
     with open("docs/watchlist.txt", "w", encoding="utf-8") as f:
         f.write(build_watchlist(setups, groups, run_date))
     with open("docs/latest.json", "w", encoding="utf-8") as f:
         json.dump(out, f, default=str, indent=1)
     page_url = os.environ.get("PAGE_URL", "")
-    discord_post(os.environ.get("DISCORD_WEBHOOK", ""), reg, setups, groups, page_url, run_date)
+    webhook = os.environ.get("DISCORD_WEBHOOK", "")
+    webhook_fut = os.environ.get("DISCORD_WEBHOOK_FUTURES", "") or webhook   # own channel if set, else the stock channel
+    discord_post(webhook, reg, setups, groups, page_url, run_date)
+    F.discord_post(webhook_fut, fut, (page_url.rstrip("/") + "/futures.html") if page_url else "", run_date)
     print(f"done: {len(setups)} setups, regime {reg['label']}, {time.time()-t0:.0f}s")
 
 

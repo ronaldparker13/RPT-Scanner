@@ -112,7 +112,7 @@ tr+tr td{border-top:1px solid #23262d}td.num{text-align:right;font-variant-numer
 a.t{color:var(--cyn);font-weight:700;text-decoration:none}a.t:hover{text-decoration:underline}
 .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;color:#000}
 .EP{background:var(--ora)}.HVC{background:var(--pur)}.SECOND_CHANCE{background:var(--cyn)}.BREAKOUT{background:var(--grn)}.BREAKOUT_READY{background:#9ccc65}
-.short .tag{background:var(--red)}.chase{color:var(--red);font-weight:700}.grp{color:var(--mut);font-size:12px}
+.short .tag{background:var(--red)}td.long{color:var(--grn)}td.short{color:var(--red)}td.flat{color:var(--mut)}.chase{color:var(--red);font-weight:700}.grp{color:var(--mut);font-size:12px}
 .scroll{overflow-x:auto}.foot{color:var(--mut);font-size:12px;margin-top:20px}
 a.dl{color:var(--cyn);font-weight:700;text-decoration:none}.hint{color:var(--mut)}
 @media(max-width:700px){td,th{padding:6px 7px;font-size:13px}}
@@ -130,7 +130,7 @@ def build_html(reg, groups, setups, universe, run_date, note=""):
     idx = " · ".join(f"{b} {'above' if v['above_50'] else 'BELOW'} 50 ({v['chg_1w']:+.1f}% 1w)" for b, v in reg["indexes"].items())
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
              f"<title>{C.REPORT_TITLE} — {run_date}</title><style>{CSS}</style></head><body><div class='wrap'>",
-             f"<h1>{C.REPORT_TITLE}</h1><div class='sub'>After the close · {run_date} · {len(universe)} stocks screened · tap a ticker to open it in TradingView · <a class='dl' href='watchlist.txt' download='RPT {run_date}.txt'>⬇ Download watchlist</a> <span class='hint'>(TradingView → watchlist ⋯ menu → Import list)</span></div>",
+             f"<h1>{C.REPORT_TITLE}</h1><div class='sub'>After the close · {run_date} · {len(universe)} stocks screened · tap a ticker to open it in TradingView · <a class='dl' href='watchlist.txt' download='RPT {run_date}.txt'>⬇ Download watchlist</a> <span class='hint'>(TradingView → watchlist ⋯ menu → Import list)</span> · <a class='dl' href='futures.html'>→ Futures board</a></div>",
              f"<div class='strip'><span class='pill {reg['color']}'>{reg['label']}</span>",
              f"<span class='kv'>{idx}</span>",
              f"<span class='kv'>Above 50-day: <b>{reg['pct_above_50']:.0f}%</b> · Above 200: <b>{reg['pct_above_200']:.0f}%</b> · Up 4%+: <b>{reg['up4']}</b> / Down 4%+: <b>{reg['down4']}</b></span>",
