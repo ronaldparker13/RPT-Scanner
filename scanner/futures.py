@@ -140,7 +140,7 @@ def discord_post(webhook, t: pd.DataFrame, page_url: str, run_date: str):
         tick = r["tv"].split(":")[1]
         link = f"https://www.tradingview.com/chart/?symbol={r['tv']}"
         lines.append(f"{flag} **[{tick}]({link})** {r['name']} · {side} · ATR x{r['vol_ratio']:.2f} · {r['chg20']:+.1f}% 20d · {r['ext_atr50']:+.1f} ATR vs 50")
-    embed = {"title": f"🧭 RPT Futures · {nice} · {n_play} in play", "url": page_url or None, "color": color,
+    embed = {"title": f"RPT Futures · {nice} · {n_play} in play", "url": page_url or None, "color": color,
              "description": "Top six by score. 🔥 in play (ATR expanding + leaving its range) · ◐ waking · · quiet",
              "fields": [{"name": "Markets", "value": "\n".join(lines), "inline": False}],
              "footer": {"text": "Trade the side, not the market · tap the title for the full board"}}
