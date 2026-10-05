@@ -1,8 +1,8 @@
 name: nightly scan
 on:
   schedule:
-    - cron: "40 21 * * 1-5"
-  workflow_dispatch:
+    - cron: "40 21 * * 1-5"    # 21:40 UTC = 4:40 PM CT (5:40 PM during standard time), Mon-Fri
+  workflow_dispatch:           # "Run workflow" button for a manual run
 permissions:
   contents: write
 jobs:
@@ -17,6 +17,7 @@ jobs:
       - run: python run.py
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK_FUTURES: ${{ secrets.DISCORD_WEBHOOK_FUTURES }}
           PAGE_URL: https://ronaldparker13.github.io/RPT-Scanner/
       - name: commit the page
         run: |
