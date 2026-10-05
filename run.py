@@ -74,6 +74,8 @@ def main():
     page = build_html(reg, groups, setups, universe, run_date, note)
     with open("docs/futures.html", "w", encoding="utf-8") as f:
         f.write(F.build_page(fut, run_date, CSS, note))
+    with open("docs/futures_watchlist.txt", "w", encoding="utf-8") as f:
+        f.write(F.build_watchlist(fut))
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(page)
     with open(f"docs/history/{run_date}.html", "w", encoding="utf-8") as f:
