@@ -7,7 +7,7 @@ MIN_PRICE = 10.0
 ADR_MIN, ADR_MAX = 3.0, 12.0        # % — 5-8 is the sweet spot; 3-12 keeps the list from starving
 HISTORY_DAYS = 320                  # calendar days of daily bars to pull (need 200+ trading days)
 
-# ---- setup rules (same as the RPT Stock Chart Pine) ----
+# ---- setup rules (same as the RPT Stock Chart Pine; ATR is Wilder's, same as TradingView's ta.atr) ----
 EP_GAP_PCT = 5.0
 EP_VOL_MULT = 1.5
 HVC_VOL_MULT = 2.0

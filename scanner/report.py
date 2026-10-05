@@ -84,7 +84,8 @@ def setup_rows(universe: pd.DataFrame, stats: dict, exchanges: dict, top_groups:
                 sc += 10
             rows.append(dict(symbol=s, exchange=exchanges.get(s, meta.loc[s, "exchange"]), name=junk.sub("", str(meta.loc[s, "name"])).strip(" ,.") or str(meta.loc[s, "name"]),
                              industry=meta.loc[s, "industry"], setup=kind, side=side, score=sc,
-                             price=d["price"], level=level, stop=stop, risk_pct=abs(d["price"] - stop) / d["price"] * 100,
+                             price=d["price"], level=level, stop=stop,
+                             risk_pct=abs((level if kind == "BREAKOUT_READY" else d["price"]) - stop) / (level if kind == "BREAKOUT_READY" else d["price"]) * 100,   # breakout-ready: risk from the intended entry
                              adr=d["adr_pct"], rvol=d["rvol"], chg=d["chg_pct"], ext=d["ext_atr50"],
                              dollar_vol=d["avg_dollar"], chase=d["ext_atr50"] >= C.CHASE_ATR and kind != "EP",
                              top_group=meta.loc[s, "industry"] in top_groups))
@@ -123,14 +124,14 @@ def fmt_dollar(v):
     return f"${v/1e9:.1f}B" if v >= 1e9 else f"${v/1e6:.0f}M"
 
 
-def build_html(reg, groups, setups, universe, run_date, note=""):
+def build_html(reg, groups, setups, universe, run_date, note="", session_label="After the close"):
     e = html.escape
     sec_top = ", ".join(f"{SECTOR_NAMES.get(k,k)} {v:+.1f}%" for k, v in reg["sectors"][:3])
     sec_bot = ", ".join(f"{SECTOR_NAMES.get(k,k)} {v:+.1f}%" for k, v in reg["sectors"][-3:])
     idx = " · ".join(f"{b} {'above' if v['above_50'] else 'BELOW'} 50 ({v['chg_1w']:+.1f}% 1w)" for b, v in reg["indexes"].items())
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
              f"<title>{C.REPORT_TITLE} — {run_date}</title><style>{CSS}</style></head><body><div class='wrap'>",
-             f"<h1>{C.REPORT_TITLE}</h1><div class='sub'>After the close · {run_date} · {len(universe)} stocks screened · tap a ticker to open it in TradingView · <a class='dl' href='watchlist.txt' download='RPT {run_date}.txt'>⬇ Download watchlist</a> <span class='hint'>(TradingView → watchlist ⋯ menu → Import list)</span> · <a class='dl' href='futures.html'>→ Futures board</a></div>",
+             f"<h1>{C.REPORT_TITLE}</h1><div class='sub'>{session_label} · {run_date} · {len(universe)} stocks screened · tap a ticker to open it in TradingView · <a class='dl' href='watchlist.txt' download='RPT {run_date}.txt'>⬇ Download watchlist</a> <span class='hint'>(TradingView → watchlist ⋯ menu → Import list)</span> · <a class='dl' href='futures.html'>→ Futures board</a></div>",
              f"<div class='strip'><span class='pill {reg['color']}'>{reg['label']}</span>",
              f"<span class='kv'>{idx}</span>",
              f"<span class='kv'>Above 50-day: <b>{reg['pct_above_50']:.0f}%</b> · Above 200: <b>{reg['pct_above_200']:.0f}%</b> · Up 4%+: <b>{reg['up4']}</b> / Down 4%+: <b>{reg['down4']}</b></span>",
@@ -205,14 +206,15 @@ def discord_post(webhook, reg, setups, groups, page_url, run_date):
         lines = []
         for _, r in sub.iterrows():
             tag = short.get(r["setup"], r["setup"])
-            warn = " !" if r["chase"] else ""
-            lines.append(f"{r['symbol']:<5} {tag:<10} {r['level']:>8.2f}  stop {r['stop']:>8.2f}  {r['rvol']:>4.1f}x{warn}")
-        fields.append({"name": head, "value": "```\n" + "\n".join(lines) + "\n```", "inline": False})
+            warn = " ⚠️ extended" if r["chase"] else ""
+            link = tv_link(r["symbol"], r["exchange"])
+            lines.append(f"**[{r['symbol']}]({link})** {tag} · lvl {r['level']:.2f} · stop {r['stop']:.2f} · {r['rvol']:.1f}x{warn}")
+        fields.append({"name": head, "value": "\n".join(lines), "inline": False})
     if not fields:
         fields.append({"name": "Setups", "value": "Nothing qualified today.", "inline": False})
     embed = {"title": f"{emoji} RPT Scanner · {nice} · {reg['label']}", "url": page_url or None, "color": color,
              "description": desc, "fields": fields,
-             "footer": {"text": "lvl = the price that matters · stop = low/high of the day · x = RVOL · ! = extended, don't chase · tap the title for the full page"}}
+             "footer": {"text": "lvl = the price that matters · stop = low/high of the day · x = RVOL · tap a ticker to open it in TradingView · tap the title for the full page"}}
     try:
         requests.post(webhook, json={"embeds": [embed]}, timeout=20)
     except Exception as ex:

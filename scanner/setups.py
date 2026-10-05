@@ -21,7 +21,7 @@ def indicators(df: pd.DataFrame) -> dict | None:
     ma10, ma20, ma50 = c.rolling(10).mean(), c.rolling(20).mean(), c.rolling(50).mean()
     ma200 = c.rolling(200).mean() if n >= 200 else pd.Series(np.nan, index=c.index)
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean()
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()   # Wilder / RMA, same as TradingView's ta.atr
     adr_pct = ((h / l - 1.0).rolling(20).mean() * 100.0)
     avg_vol = v.rolling(20).mean()
     avg_dollar = (v * c).rolling(20).mean()
@@ -40,7 +40,10 @@ def indicators(df: pd.DataFrame) -> dict | None:
         rs_1m=float((c.iloc[-1] / c.iloc[-22] - 1) * 100) if n > 22 else np.nan,
         rs_3m=float((c.iloc[-1] / c.iloc[-64] - 1) * 100) if n > 64 else np.nan,
         new_20d_high=bool(c.iloc[-1] >= c.iloc[-21:].max()),
-        above_50=bool(px > ma50.iloc[-1]), above_200=bool(px > ma200.iloc[-1]) if not np.isnan(ma200.iloc[-1]) else True,
+        above_50=bool(px > ma50.iloc[-1]),
+        has_200=bool(not np.isnan(ma200.iloc[-1])),
+        above_200=bool(not np.isnan(ma200.iloc[-1]) and px > ma200.iloc[-1]),
+        below_200=bool(not np.isnan(ma200.iloc[-1]) and px < ma200.iloc[-1]),
         up4=bool(c.iloc[-1] / c.iloc[-2] - 1 >= 0.04), down4=bool(c.iloc[-1] / c.iloc[-2] - 1 <= -0.04),
         low_today=float(l.iloc[-1]), high_today=float(h.iloc[-1]),
     )
@@ -56,7 +59,8 @@ def indicators(df: pd.DataFrame) -> dict | None:
     rng_pos = (px - d["low_today"]) / (d["high_today"] - d["low_today"]) if d["high_today"] > d["low_today"] else 0.5
     vol_ep = d["rvol"] >= C.EP_VOL_MULT
     vol_hvc = d["rvol"] >= C.HVC_VOL_MULT
-    healthy = d["above_200"]
+    bullish = d["above_200"]            # three-state: bullish / bearish / unknown (no 200 yet, or exactly on it)
+    bearish = d["below_200"]
     g = C.EP_GAP_PCT / 100.0
 
     # EP long / short (today)
@@ -69,13 +73,13 @@ def indicators(df: pd.DataFrame) -> dict | None:
     hvc_long = (not ep_long) and vol_hvc and px > prev_c and rng_pos >= 0.75
     hvc_short = (not ep_short) and vol_hvc and px < prev_c and rng_pos <= 0.25
 
-    if ep_long and healthy:
+    if ep_long and bullish:
         setups.append(("EP", "long", px, d["low_today"]))
-    if hvc_long and healthy:
+    if hvc_long and bullish:
         setups.append(("HVC", "long", px, d["low_today"]))
-    if ep_short and not healthy:
+    if ep_short and bearish:
         setups.append(("EP", "short", px, d["high_today"]))
-    if hvc_short and not healthy:
+    if hvc_short and bearish:
         setups.append(("HVC", "short", px, d["high_today"]))
 
     # Second chance: a recent EP/HVC close (long) or EP/HVC-short close (short) within SECOND_CHANCE_PCT
@@ -84,6 +88,8 @@ def indicators(df: pd.DataFrame) -> dict | None:
     for k in range(C.SECOND_CHANCE_MIN_DAYS, min(C.SECOND_CHANCE_MAX_DAYS, n - 2) + 1):
         i = n - 1 - k
         pc, cc, oo, hh, ll = c.iloc[i - 1], c.iloc[i], o.iloc[i], h.iloc[i], l.iloc[i]
+        if pc > 0 and abs(cc / pc - 1) >= C.CORP_ACTION_CHG_PCT / 100:   # an unadjusted split / spin-off is never a reference level
+            continue
         rp = (cc - ll) / (hh - ll) if hh > ll else 0.5
         rvk = rv_hist.iloc[i]
         was_ep = rvk >= C.EP_VOL_MULT and oo >= pc * (1 + g) and cc >= pc * (1 + g) and rp >= 0.3
@@ -95,13 +101,14 @@ def indicators(df: pd.DataFrame) -> dict | None:
         if (was_eps or was_hvcs) and lvl_short is None:
             lvl_short = float(cc)
     # long: price holding at / just above the level (-1% .. +SECOND_CHANCE_PCT); short: at / just below it
-    if healthy and lvl_long and -1.0 <= (px / lvl_long - 1) * 100 <= C.SECOND_CHANCE_PCT and not ep_long and not hvc_long and d["rvol"] < C.HVC_VOL_MULT:
+    EPS = 1e-9   # explicit price bounds so 99.00 / 102.00 against a 100.00 event sit inside the band, not on a float edge
+    if bullish and lvl_long and lvl_long * (1 - 0.01) - EPS <= px <= lvl_long * (1 + C.SECOND_CHANCE_PCT / 100) + EPS and not ep_long and not hvc_long and d["rvol"] < C.HVC_VOL_MULT:
         setups.append(("SECOND_CHANCE", "long", lvl_long, min(d["low_today"], lvl_long * 0.98)))
-    if (not healthy) and lvl_short and -C.SECOND_CHANCE_PCT <= (px / lvl_short - 1) * 100 <= 1.0 and not ep_short and not hvc_short and d["rvol"] < C.HVC_VOL_MULT:
+    if bearish and lvl_short and lvl_short * (1 - C.SECOND_CHANCE_PCT / 100) - EPS <= px <= lvl_short * (1 + 0.01) + EPS and not ep_short and not hvc_short and d["rvol"] < C.HVC_VOL_MULT:
         setups.append(("SECOND_CHANCE", "short", lvl_short, max(d["high_today"], lvl_short * 1.02)))
 
     # Breakout-ready / breakout (long only): prior move then a tight base riding the 10/20
-    if healthy and n >= 120:
+    if bullish and n >= 120:
         best = None
         for base_len in range(C.BASE_MIN_DAYS, C.BASE_MAX_DAYS + 1, 5):
             base = df.iloc[-base_len - 1:-1]
