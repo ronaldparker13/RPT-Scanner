@@ -82,11 +82,12 @@ def html_section(t: pd.DataFrame) -> str:
         return ""
     import html as H
     out = ["<h2>Futures: what's in play (volatility expanding + leaving its range + volume)</h2><div class='scroll'><table>",
-           "<tr><th>#</th><th>Market</th><th>Status</th><th>Side</th><th class='num'>ATR 20/100</th><th class='num'>Vol 20/100</th><th class='num'>20d move</th><th class='num'>vs 50</th><th class='num'>Score</th></tr>"]
+           "<tr><th>#</th><th>Ticker</th><th>Market</th><th>Status</th><th>Side</th><th class='num'>ATR 20/100</th><th class='num'>Vol 20/100</th><th class='num'>20d move</th><th class='num'>vs 50</th><th class='num'>Score</th></tr>"]
     for i, r in t.iterrows():
         status = "<span class='tag BREAKOUT'>IN PLAY</span>" if r["in_play"] else ("<span class='tag BREAKOUT_READY'>waking</span>" if r["score"] >= 40 else "<span class='grp'>quiet</span>")
         side = r["direction"]
-        out.append(f"<tr><td>{i+1}</td><td><a class='t' href='https://www.tradingview.com/chart/?symbol={H.escape(r['tv'])}' target='tradingview'>{H.escape(r['name'])}</a></td>"
+        tick = r["tv"].split(":")[1]
+        out.append(f"<tr><td>{i+1}</td><td><a class='t' href='https://www.tradingview.com/chart/?symbol={H.escape(r['tv'])}' target='tradingview'>{H.escape(tick)}</a></td><td>{H.escape(r['name'])}</td>"
                    f"<td>{status}</td><td class='{side}'>{side}</td><td class='num'>{r['vol_ratio']:.2f}</td><td class='num'>{(r['part'] if not np.isnan(r['part']) else 0):.2f}</td>"
                    f"<td class='num'>{r['chg20']:+.1f}%</td><td class='num'>{r['ext_atr50']:+.1f} ATR</td><td class='num'>{r['score']:.0f}</td></tr>")
     out.append("</table></div><div class='kv'>IN PLAY = ATR expanding 30%+ and price leaving its 50-day range. Waking = one of the two with volume building. Side = price vs a rising/falling 20-day. Trade the side, not the market.</div>")
@@ -101,11 +102,26 @@ def build_page(t: pd.DataFrame, run_date: str, css: str, note: str = "") -> str:
     return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
             f"<title>RPT Futures — {run_date}</title><style>{css}</style></head><body><div class='wrap'>"
             f"<h1>RPT Futures</h1><div class='sub'>After the close · {run_date} · {len(t)} TopStep markets · {n_play} in play · "
+            f"<a class='dl' href='futures_watchlist.txt' download='RPT Futures {run_date}.txt'>⬇ Download watchlist</a> · "
             f"<a class='dl' href='index.html'>→ Stock board</a></div>"
             + body +
             "<h2>How to read it</h2><div class='kv'>A market is IN PLAY when its 20-day ATR is 30%+ above its 100-day ATR and price is leaving its 50-day range (new high / low, or 3 of the last 5 closes outside the prior 20-day range). Waking = volatility or range expansion with volume building. Side = price vs a rising or falling 20-day; trade with it. vs 50 is the stretch from the 50-day in ATR, same gauge as the stock readout. Tap a market to open the micro in TradingView.</div>"
             + (f"<div class='foot'>{note}</div>" if note else "") +
             f"<div class='foot'>RPT Scanner · futures board · generated {dt.datetime.utcnow():%Y-%m-%d %H:%M} UTC</div></div></body></html>")
+
+
+def build_watchlist(t: pd.DataFrame) -> str:
+    """TradingView import format: IN PLAY, WAKING, then the rest, each in score order."""
+    if t.empty:
+        return "###FUTURES"
+    parts = []
+    for head, mask in (("IN PLAY", t["in_play"]), ("WAKING", (~t["in_play"]) & (t["score"] >= 40)), ("QUIET", (~t["in_play"]) & (t["score"] < 40))):
+        sub = t[mask]
+        if sub.empty:
+            continue
+        parts.append(f"###{head}")
+        parts.extend(sub["tv"].tolist())
+    return ",".join(parts)
 
 
 def discord_post(webhook, t: pd.DataFrame, page_url: str, run_date: str):
@@ -121,10 +137,12 @@ def discord_post(webhook, t: pd.DataFrame, page_url: str, run_date: str):
     for _, r in top.iterrows():
         flag = "🔥" if r["in_play"] else ("◐" if r["score"] >= 40 else "·")
         side = {"long": "LONG", "short": "SHORT"}.get(r["direction"], "flat")
-        lines.append(f"{flag} {r['name']:<14} {side:<5} ATR x{r['vol_ratio']:.2f}  {r['chg20']:+5.1f}% 20d  {r['ext_atr50']:+.1f} ATR vs 50")
+        tick = r["tv"].split(":")[1]
+        link = f"https://www.tradingview.com/chart/?symbol={r['tv']}"
+        lines.append(f"{flag} **[{tick}]({link})** {r['name']} · {side} · ATR x{r['vol_ratio']:.2f} · {r['chg20']:+.1f}% 20d · {r['ext_atr50']:+.1f} ATR vs 50")
     embed = {"title": f"🧭 RPT Futures · {nice} · {n_play} in play", "url": page_url or None, "color": color,
-             "description": "Top six by score. 🔥 = in play (ATR expanding + leaving its range), ◐ = waking.",
-             "fields": [{"name": "Markets", "value": "```\n" + "\n".join(lines) + "\n```", "inline": False}],
+             "description": "Top six by score. 🔥 in play (ATR expanding + leaving its range) · ◐ waking · · quiet",
+             "fields": [{"name": "Markets", "value": "\n".join(lines), "inline": False}],
              "footer": {"text": "Trade the side, not the market · tap the title for the full board"}}
     try:
         requests.post(webhook, json={"embeds": [embed]}, timeout=20)
