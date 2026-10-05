@@ -53,8 +53,8 @@ def main():
         if s not in bars:
             continue
         d = indicators(bars[s])
-        if d is None or d["price"] < C.MIN_PRICE or d["avg_dollar"] < C.MIN_DOLLAR_VOLUME:
-            continue
+        if d is None or d["price"] < C.MIN_PRICE or d["avg_dollar"] < C.MIN_DOLLAR_VOLUME or d.get("corp_action"):
+            continue   # corporate-action names are out of everything, breadth and groups included
         if not (C.ADR_MIN <= d["adr_pct"] <= C.ADR_MAX):
             continue
         stats[s] = d
@@ -69,18 +69,27 @@ def main():
         exchanges = D.fetch_exchanges(sorted(hits))
     setups = setup_rows(universe, stats, exchanges, top)
 
-    run_date = (bars[next(iter(bars))].index[-1]).strftime("%Y-%m-%d")
+    # report date = the freshest bar across the stock universe; session label says whether the close is in
+    last_bar = max(bars[s].index[-1] for s in bars)
+    run_date = last_bar.strftime("%Y-%m-%d")
+    import zoneinfo
+    now_ct = dt.datetime.now(zoneinfo.ZoneInfo("America/Chicago"))
+    after_close = now_ct.strftime("%Y-%m-%d") != run_date or now_ct.hour >= 15
+    session_label = "After the close" if after_close else f"Intraday snapshot {now_ct:%H:%M} CT"
+    if args.demo:
+        session_label = "After the close"
     fut = F.in_play_table(fut_bars)
-    page = build_html(reg, groups, setups, universe, run_date, note)
+    page = build_html(reg, groups, setups, universe, run_date, note, session_label)
+    fut_date = F.latest_date(fut) or run_date
     with open("docs/futures.html", "w", encoding="utf-8") as f:
-        f.write(F.build_page(fut, run_date, CSS, note))
+        f.write(F.build_page(fut, fut_date, CSS, note, session_label))
     with open("docs/futures_watchlist.txt", "w", encoding="utf-8") as f:
         f.write(F.build_watchlist(fut))
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(page)
     with open(f"docs/history/{run_date}.html", "w", encoding="utf-8") as f:
         f.write(page)
-    out = dict(date=run_date, regime={k: v for k, v in reg.items() if k != "sectors"}, sectors=reg["sectors"],
+    out = dict(date=run_date, futures_date=fut_date, session_label=session_label, regime={k: v for k, v in reg.items() if k != "sectors"}, sectors=reg["sectors"],
                groups=groups.head(C.TOP_GROUPS).to_dict("records"),
                setups=setups.to_dict("records") if not setups.empty else [],
                futures=fut.to_dict("records") if not fut.empty else [])
@@ -88,11 +97,7 @@ def main():
         f.write(build_watchlist(setups, groups, run_date))
     with open("docs/latest.json", "w", encoding="utf-8") as f:
         json.dump(out, f, default=str, indent=1)
-    page_url = os.environ.get("PAGE_URL", "")
-    webhook = os.environ.get("DISCORD_WEBHOOK", "")
-    webhook_fut = os.environ.get("DISCORD_WEBHOOK_FUTURES", "") or webhook   # own channel if set, else the stock channel
-    discord_post(webhook, reg, setups, groups, page_url, run_date)
-    F.discord_post(webhook_fut, fut, (page_url.rstrip("/") + "/futures.html") if page_url else "", run_date)
+    # Discord posting lives in notify.py and runs AFTER the page is pushed (see the workflow)
     print(f"done: {len(setups)} setups, regime {reg['label']}, {time.time()-t0:.0f}s")
 
 
