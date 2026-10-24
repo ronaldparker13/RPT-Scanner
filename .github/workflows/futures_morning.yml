@@ -1,0 +1,35 @@
+name: morning futures scan
+on:
+  schedule:
+    - cron: "0 8 * * 1-5"
+      timezone: "America/Chicago"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: rpt-scanner-pages
+  cancel-in-progress: false
+jobs:
+  futures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Rank four futures on completed Yahoo 30m bars
+        run: python run_futures.py
+      - name: Commit only futures pages
+        run: |
+          git config user.name "rpt-scanner-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs/futures.html docs/futures_watchlist.txt docs/futures_latest.json
+          git commit -m "futures scan $(date -u +%F)" || echo "nothing to commit"
+          git push
+      - name: Post futures ranking to Discord
+        run: python notify_futures.py
+        env:
+          DISCORD_WEBHOOK_FUTURES: ${{ secrets.DISCORD_WEBHOOK_FUTURES }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          PAGE_URL: https://ronaldparker13.github.io/RPT-Scanner/

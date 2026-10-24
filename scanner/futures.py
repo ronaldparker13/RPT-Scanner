@@ -1,164 +1,298 @@
-"""Futures 'in play' ranking: which markets are waking up.
+"""30-minute futures continuation ranking for the four RPT trading markets.
 
-Three signs, all from daily bars (simple-average ATRs here; the stock scanner and the Pine use Wilder's ATR):
-  1. Volatility expanding  : ATR(20) / ATR(100) >= 1.3
-  2. Leaving its range     : close within 0.5% of a 50-day high / low, OR closes outside the prior 20-day range on
-                             3 of the last 5 days
-  3. Participation         : volume(20) / volume(100)  (scored, not required)
-IN PLAY = 1 and 2. WAKING = score >= 40 (one of the two, or both partially) - volume is scored but not required.
-Side: close above (below) the 20-day with the 20-day higher (lower) than 3 days ago.
-Markets with incomplete bars (missing high / low / close in the last 5 days) or stale data (last bar more than
-one session behind the freshest market) are reported as "no data" rather than scored.
+Uses only completed 30m candles. The 65 SMA supplies multi-session bias;
+causally confirmed price swings identify the countertrend reset and its first
+opposing CHOCH. 20 SMA alignment is a bonus, never a prerequisite for CHOCH.
+
+This is an opportunity watchlist, NOT a backtested trading signal. Yahoo futures
+quotes can be delayed, and full-size Yahoo symbols proxy the micro contracts.
 """
+import datetime as dt
+import html as H
+import math
+
 import numpy as np
 import pandas as pd
 
-# Yahoo continuous-contract tickers. Label, TradingView symbol for the link.
-FUTURES = [   # TopStep-tradable only: CME, CBOT, COMEX, NYMEX. No ICE (coffee, sugar, cocoa, dollar index).
+# Yahoo continuous contract -> displayed market -> TradingView MICRO chart.
+FUTURES = [
     ("NQ=F", "Nasdaq 100", "CME_MINI:MNQ1!"),
-    ("ES=F", "S&P 500", "CME_MINI:MES1!"),
-    ("RTY=F", "Russell 2000", "CME_MINI:M2K1!"),
-    ("YM=F", "Dow", "CBOT_MINI:MYM1!"),
-    ("GC=F", "Gold", "COMEX:MGC1!"),
-    ("SI=F", "Silver", "COMEX:SIL1!"),
-    ("HG=F", "Copper", "COMEX:MHG1!"),
-    ("PL=F", "Platinum", "NYMEX:PL1!"),
     ("CL=F", "Crude oil", "NYMEX:MCL1!"),
-    ("NG=F", "Natural gas", "NYMEX:MNG1!"),
-    ("RB=F", "Gasoline", "NYMEX:RB1!"),
-    ("HO=F", "Heating oil", "NYMEX:HO1!"),
+    ("GC=F", "Gold", "COMEX:MGC1!"),
     ("BTC=F", "Bitcoin", "CME:MBT1!"),
-    ("ETH=F", "Ether", "CME:MET1!"),
-    ("ZB=F", "30-yr bond", "CBOT:ZB1!"),
-    ("ZN=F", "10-yr note", "CBOT:ZN1!"),
-    ("ZF=F", "5-yr note", "CBOT:ZF1!"),
-    ("6E=F", "Euro", "CME:M6E1!"),
-    ("6J=F", "Yen", "CME:6J1!"),
-    ("6B=F", "British pound", "CME:M6B1!"),
-    ("6A=F", "Australian dollar", "CME:M6A1!"),
-    ("6C=F", "Canadian dollar", "CME:6C1!"),
-    ("ZC=F", "Corn", "CBOT:ZC1!"),
-    ("ZS=F", "Soybeans", "CBOT:ZS1!"),
-    ("ZW=F", "Wheat", "CBOT:ZW1!"),
-    ("LE=F", "Live cattle", "CME:LE1!"),
-    ("HE=F", "Lean hogs", "CME:HE1!"),
 ]
 
+PIVOT_LEFT = 2
+PIVOT_RIGHT = 2  # a pivot is only available two FULL candles later
+MIN_BARS = 190
+RESET_WINDOW = 96
+CHOCH_LOOKBACK = 16
+MAX_DATA_AGE_MINUTES = 180
 
-def in_play_table(bars: dict) -> pd.DataFrame:
-    rows = []
-    latest = max((bars[s].index[-1] for s, _, _ in FUTURES if s in bars and len(bars[s])), default=None)
-    for yf_sym, name, tv in FUTURES:
-        df = bars.get(yf_sym)
-        if df is None or len(df) < 120 or df[["High", "Low", "Close"]].tail(5).isna().any().any() or (latest is not None and (latest - df.index[-1]).days > 3):
-            rows.append(dict(symbol=yf_sym, name=name, tv=tv, price=np.nan, vol_ratio=np.nan, part=np.nan, breakout=False, direction="no data", ext_atr50=np.nan, chg20=np.nan, score=-1.0, in_play=False, asof=None))
+
+def _base(yf_sym, name, tv):
+    return dict(symbol=yf_sym, name=name, tv=tv, price=np.nan,
+                direction="no data", status="NO DATA", setup="insufficient data",
+                score=np.nan, trend_score=0, reset_score=0, choch_score=0,
+                alignment_score=0, slope_atr=np.nan, side_pct=np.nan,
+                ma20=np.nan, ma65=np.nan, asof=None, lag_min=np.nan,
+                signal_time=None, pivot_level=np.nan)
+
+
+def _pivots(high: np.ndarray, low: np.ndarray):
+    """Return (pivot index, value, confirmation index) for fully-confirmed swings."""
+    highs, lows = [], []
+    width = PIVOT_LEFT + PIVOT_RIGHT
+    for i in range(PIVOT_LEFT, len(high) - PIVOT_RIGHT):
+        h, l = high[i], low[i]
+        if np.isfinite(h) and h > max(high[i-PIVOT_LEFT:i]) and h >= max(high[i+1:i+PIVOT_RIGHT+1]):
+            highs.append((i, float(h), i + PIVOT_RIGHT))
+        if np.isfinite(l) and l < min(low[i-PIVOT_LEFT:i]) and l <= min(low[i+1:i+PIVOT_RIGHT+1]):
+            lows.append((i, float(l), i + PIVOT_RIGHT))
+    return highs, lows
+
+
+def _reset_at(j, side, close, ph, pl):
+    """Return (structure valid, break level) using pivots already confirmed at j."""
+    start = max(0, j - RESET_WINDOW)
+    highs = [p for p in ph if start <= p[0] < j and p[2] <= j]
+    lows = [p for p in pl if start <= p[0] < j and p[2] <= j]
+    if len(highs) < 2 or len(lows) < 2:
+        return False, np.nan
+    h0, h1 = highs[-2], highs[-1]
+    l0, l1 = lows[-2], lows[-1]
+    # The final pivot belongs to the completed countertrend impulse. For a
+    # bearish continuation, that impulse consists of HH/HL; bullish is LH/LL.
+    if side == "short":
+        valid = h1[1] > h0[1] and l1[1] > l0[1]
+        # Require the structure to have emerged in the recent pullback.
+        valid = valid and j - h1[0] <= 32 and j - l1[0] <= 40
+        return valid, l1[1]
+    if side == "long":
+        valid = h1[1] < h0[1] and l1[1] < l0[1]
+        valid = valid and j - h1[0] <= 40 and j - l1[0] <= 32
+        return valid, h1[1]
+    return False, np.nan
+
+
+def _structure(side, close, high, low):
+    """Find first break after each causally identifiable countertrend reset."""
+    ph, pl = _pivots(high, low)
+    n = len(close)
+    # A candidate break only happens on its first close through the pivot.
+    events = []
+    for j in range(max(MIN_BARS, n - RESET_WINDOW), n):
+        valid, level = _reset_at(j, side, close, ph, pl)
+        if not valid or not np.isfinite(level):
             continue
-        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"].replace(0, np.nan)
-        tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-        atr20, atr100 = tr.rolling(20).mean(), tr.rolling(100).mean()
-        vol20, vol100 = v.rolling(20).mean(), v.rolling(100).mean()
-        ma20, ma50 = c.rolling(20).mean(), c.rolling(50).mean()
-        hi50, lo50 = h.rolling(50).max(), l.rolling(50).min()
-        hi20p, lo20p = h.rolling(20).max().shift(1), l.rolling(20).min().shift(1)
-        px = float(c.iloc[-1])
-        vol_ratio = float(atr20.iloc[-1] / atr100.iloc[-1]) if atr100.iloc[-1] > 0 else np.nan
-        part = float(vol20.iloc[-1] / vol100.iloc[-1]) if vol100.iloc[-1] and vol100.iloc[-1] > 0 else np.nan
-        above = (c > hi20p).tail(5).sum(); below = (c < lo20p).tail(5).sum()
-        at_hi50 = px >= hi50.iloc[-1] * 0.995; at_lo50 = px <= lo50.iloc[-1] * 1.005
-        breakout = bool(at_hi50 or at_lo50 or above >= 3 or below >= 3)
-        direction = "long" if px > ma20.iloc[-1] and ma20.iloc[-1] > ma20.iloc[-4] else "short" if px < ma20.iloc[-1] and ma20.iloc[-1] < ma20.iloc[-4] else "flat"
-        ext = float((px - ma50.iloc[-1]) / atr20.iloc[-1]) if atr20.iloc[-1] > 0 else np.nan
-        chg20 = float((px / c.iloc[-21] - 1) * 100)
-        # score: volatility expansion carries the most weight, then breakout, then participation
-        score = 0.0
-        if not np.isnan(vol_ratio): score += min(max(vol_ratio - 1.0, 0), 1.0) * 50
-        if breakout: score += 30
-        if not np.isnan(part): score += min(max(part - 1.0, 0), 1.0) * 20
-        in_play = (not np.isnan(vol_ratio) and vol_ratio >= 1.3) and breakout
-        rows.append(dict(symbol=yf_sym, name=name, tv=tv, price=px, vol_ratio=vol_ratio, part=part, breakout=breakout,
-                         direction=direction, ext_atr50=ext, chg20=chg20, score=round(score, 1), in_play=in_play, asof=df.index[-1].strftime("%Y-%m-%d")))
-    t = pd.DataFrame(rows)
-    return t.sort_values("score", ascending=False).reset_index(drop=True) if not t.empty else t
+        crossed = (close[j] < level <= close[j-1]) if side == "short" else (close[j] > level >= close[j-1])
+        if crossed and (not events or j - events[-1][0] > 16):
+            events.append((j, level))
+    # A fresh countertrend reset must still be unbroken if it's a WATCH.
+    valid_now, level_now = _reset_at(n-1, side, close, ph, pl)
+    unbroken = (close[-1] >= level_now) if side == "short" else (close[-1] <= level_now)
+    if not valid_now or not np.isfinite(level_now):
+        unbroken = False
+    recent = events[-1] if events and n - 1 - events[-1][0] <= CHOCH_LOOKBACK else None
+    return bool(valid_now and unbroken), recent
+
+
+def _classify(df: pd.DataFrame, now: dt.datetime):
+    if df is None or len(df) < MIN_BARS:
+        return None, "insufficient 30m history"
+    d = df.copy()
+    if not isinstance(d.index, pd.DatetimeIndex) or d.index.tz is None:
+        return None, "missing bar timezone"
+    d.index = d.index.tz_convert("America/Chicago")
+    d = d[~d.index.duplicated(keep="last")].sort_index()
+    required = ("Open", "High", "Low", "Close")
+    if any(col not in d for col in required):
+        return None, "missing OHLC columns"
+    d = d.dropna(subset=list(required))
+    now_ct = pd.Timestamp(now).tz_convert("America/Chicago")
+    # Yahoo timestamps are bar-start timestamps. Never score an unfinished bar.
+    d = d[d.index + pd.Timedelta(minutes=30) <= now_ct - pd.Timedelta(minutes=1)]
+    if len(d) < MIN_BARS:
+        return None, "insufficient completed 30m bars"
+    lag = (now_ct - (d.index[-1] + pd.Timedelta(minutes=30))).total_seconds() / 60
+    if lag < 0 or lag > MAX_DATA_AGE_MINUTES:
+        return None, f"stale Yahoo candles ({lag:.0f}m since last completed bar)"
+    # If an intraday data window contains a large discontinuity near the end,
+    # historical trend context remains available, but signal freshness is not.
+    if (d.index[-1] - d.index[-2]).total_seconds() / 60 > 180:
+        return None, "missing recent consecutive 30m bars"
+    return d, ""
+
+
+def in_play_table(bars: dict, now=None) -> pd.DataFrame:
+    """Rank MNQ/MCL/MGC/MBT from 0 to 100; incomplete markets show NO DATA."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    rows = []
+    for yf_sym, name, tv in FUTURES:
+        r = _base(yf_sym, name, tv)
+        d, error = _classify(bars.get(yf_sym), now)
+        if d is None:
+            r["setup"] = error
+            rows.append(r)
+            continue
+        c, h, l = d["Close"], d["High"], d["Low"]
+        ma65, ma20 = c.rolling(65).mean(), c.rolling(20).mean()
+        tr = pd.concat([h - l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean().iloc[-1]
+        if not np.isfinite(atr) or atr <= 0:
+            r["setup"] = "invalid ATR"
+            rows.append(r)
+            continue
+        slope = float((ma65.iloc[-1] - ma65.iloc[-97]) / atr)
+        sign = 1 if slope > 0 else -1
+        directions = []
+        for step in (0, 24, 48, 72):
+            delta = float(ma65.iloc[-1-step] - ma65.iloc[-25-step])
+            directions.append(1 if delta > 0 else -1 if delta < 0 else 0)
+        consistency = sum(x == sign for x in directions) / len(directions)
+        side = ((c.iloc[-96:] > ma65.iloc[-96:]) if sign == 1 else (c.iloc[-96:] < ma65.iloc[-96:]))
+        persistence = float(side.mean())
+        strong_direction = abs(slope) >= 0.40 and consistency >= 0.75 and persistence >= 0.55
+        direction = ("long" if sign == 1 else "short") if strong_direction else "flat"
+        # Continuous 0..45 trend-quality score; no per-market point thresholds.
+        trend = round(17 * min(abs(slope) / 2.0, 1.0) + 14 * consistency + 14 * min(persistence / 0.8, 1.0))
+        if not strong_direction:
+            trend = min(trend, 24)
+        reset, recent = _structure(direction, c.to_numpy(), h.to_numpy(), l.to_numpy())
+        reset_points = 25 if reset or recent else 0
+        event_age = len(d) - 1 - recent[0] if recent else None
+        event_points = (20 if event_age is not None and event_age <= 4 else 12 if event_age is not None else 0)
+        below20 = float(ma20.iloc[-1]) > float(c.iloc[-1])
+        below65 = float(ma65.iloc[-1]) > float(c.iloc[-1])
+        curl = float(ma20.iloc[-1] - ma20.iloc[-5])
+        aligned = (direction == "short" and below20 and below65 and curl < 0) or (direction == "long" and not below20 and not below65 and curl > 0)
+        curling = (direction == "short" and curl < 0) or (direction == "long" and curl > 0)
+        align_points = 10 if aligned else 5 if curling else 0
+        score = int(max(0, min(100, trend + reset_points + event_points + align_points)))
+        if recent:
+            status = "CHOCH"
+            setup = f"First 30m CHOCH · {event_age} bars ago"
+        elif reset:
+            status = "WATCH"
+            setup = "Countertrend reset · waiting for first CHOCH"
+        elif strong_direction and aligned:
+            status = "ALIGNED"
+            setup = "Trend aligned · no fresh reset"
+        elif strong_direction:
+            status = "TREND"
+            setup = "Established trend · no fresh CHOCH"
+        else:
+            status = "CHOP"
+            setup = "Weak or mixed 65 SMA trend"
+        end_ct = d.index[-1] + pd.Timedelta(minutes=30)
+        r.update(price=float(c.iloc[-1]), direction=direction, status=status,
+                 setup=setup, score=score, trend_score=int(trend),
+                 reset_score=int(reset_points), choch_score=int(event_points),
+                 alignment_score=int(align_points), slope_atr=round(slope, 2),
+                 side_pct=round(persistence * 100), ma20=round(float(ma20.iloc[-1]), 4),
+                 ma65=round(float(ma65.iloc[-1]), 4), lag_min=round((pd.Timestamp(now).tz_convert('America/Chicago') - end_ct).total_seconds()/60),
+                 asof=end_ct.strftime("%Y-%m-%d %H:%M CT"),
+                 signal_time=(d.index[recent[0]] + pd.Timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M CT") if recent else None,
+                 pivot_level=float(recent[1]) if recent else np.nan)
+        rows.append(r)
+    table = pd.DataFrame(rows)
+    return table.sort_values(["score", "name"], ascending=[False, True], na_position="last").reset_index(drop=True)
 
 
 def latest_date(t: pd.DataFrame):
-    return max((a for a in t["asof"].dropna()), default=None) if not t.empty else None
+    vals = [str(s).split(" ")[0] for s in t.get("asof", pd.Series(dtype=str)).dropna()]
+    return max(vals) if vals else None
+
+
+def _tick(r):
+    return r["tv"].split(":")[-1]
+
+
+def _link(r):
+    return f"https://www.tradingview.com/chart/?symbol={r['tv']}"
 
 
 def html_section(t: pd.DataFrame) -> str:
-    """the table only (used inside the standalone futures page)"""
+    """Retain existing dark-page table wrappers, CSS classes and link styling."""
     if t.empty:
         return ""
-    import html as H
-    out = ["<h2>Futures: what's in play (volatility expanding + leaving its range + volume)</h2><div class='scroll'><table>",
-           "<tr><th>#</th><th>Ticker</th><th>Market</th><th>Status</th><th>Side</th><th class='num'>ATR 20/100</th><th class='num'>Vol 20/100</th><th class='num'>20d move</th><th class='num'>vs 50</th><th class='num'>Score</th></tr>"]
+    out = ["<h2>Futures: 30m 65 SMA trend + countertrend resumption opportunities</h2><div class='scroll'><table>",
+           "<tr><th>#</th><th>Ticker</th><th>Market</th><th>Status</th><th>Side</th><th class='num'>65 trend</th><th class='num'>Price-side</th><th>Countertrend / CHOCH</th><th class='num'>Data as of</th><th class='num'>Score</th></tr>"]
     for i, r in t.iterrows():
-        if r["direction"] == "no data":
-            out.append(f"<tr><td>{i+1}</td><td>{H.escape(r['tv'].split(':')[1])}</td><td>{H.escape(r['name'])}</td><td class='grp'>no data</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>")
+        tick, link = H.escape(_tick(r)), H.escape(_link(r), quote=True)
+        name = H.escape(r["name"])
+        anchor = f"<a class='t' href='{link}' target='tradingview'>{tick}</a>"
+        if r["status"] == "NO DATA":
+            out.append(f"<tr><td>{i+1}</td><td>{anchor}</td><td>{name}</td><td class='grp'>no data</td><td></td><td></td><td></td><td>{H.escape(r['setup'])}</td><td></td><td>—</td></tr>")
             continue
-        status = "<span class='tag BREAKOUT'>IN PLAY</span>" if r["in_play"] else ("<span class='tag BREAKOUT_READY'>waking</span>" if r["score"] >= 40 else "<span class='grp'>quiet</span>")
-        side = r["direction"]
-        tick = r["tv"].split(":")[1]
-        part_txt = 'n/a' if np.isnan(r['part']) else f"{r['part']:.2f}"
-        out.append(f"<tr><td>{i+1}</td><td><a class='t' href='https://www.tradingview.com/chart/?symbol={H.escape(r['tv'])}' target='tradingview'>{H.escape(tick)}</a></td><td>{H.escape(r['name'])}</td>"
-                   f"<td>{status}</td><td class='{side}'>{side}</td><td class='num'>{r['vol_ratio']:.2f}</td><td class='num'>{part_txt}</td>"
-                   f"<td class='num'>{r['chg20']:+.1f}%</td><td class='num'>{r['ext_atr50']:+.1f} ATR</td><td class='num'>{r['score']:.0f}</td></tr>")
-    out.append("</table></div><div class='kv'>IN PLAY = 20-day ATR at least 30% above the 100-day ATR AND price leaving its range (close within 0.5% of a 50-day high / low, or outside the prior 20-day range on 3 of the last 5 days). Waking = score 40+ (partway there; volume is scored, not required). Side = close vs the 20-day, with the 20-day higher or lower than 3 days ago. Trade the side, not the market.</div>")
+        status = H.escape(r["status"])
+        cls = "BREAKOUT" if r["status"] == "CHOCH" else "BREAKOUT_READY" if r["status"] in ("WATCH", "ALIGNED") else ""
+        chip = f"<span class='tag {cls}'>{status}</span>" if cls else f"<span class='grp'>{status.lower()}</span>"
+        slope = float(r["slope_atr"])
+        out.append(f"<tr><td>{i+1}</td><td>{anchor}</td><td>{name}</td><td>{chip}</td>"
+                   f"<td class='{r['direction']}'>{r['direction']}</td><td class='num'>{slope:+.2f} ATR</td>"
+                   f"<td class='num'>{int(r['side_pct'])}%</td><td>{H.escape(r['setup'])}</td>"
+                   f"<td class='num'>{H.escape(r['asof'])}</td><td class='num'>{int(r['score'])}/100</td></tr>")
+    out.append("</table></div><div class='kv'>RPT Futures: 30m 65 SMA determines established trend bias; a confirmed countertrend swing sequence and its first CHOCH indicate resumption potential. The 20 SMA alignment raises readiness but is never required for CHOCH. Scores are 0–100: trend 45, countertrend reset 25, recent CHOCH 20, 20 SMA alignment 10. Only completed 30m bars; Yahoo quotes may be delayed. A CHOCH is a chart-review alert, not an automatic trade entry.</div>")
     return "".join(out)
 
 
-def build_page(t: pd.DataFrame, run_date: str, css: str, note: str = "", session_label: str = "After the close") -> str:
-    """Standalone futures board."""
-    import datetime as dt
-    n_play = int(t["in_play"].sum()) if not t.empty else 0
-    body = html_section(t) if not t.empty else "<div class='kv'>No futures data tonight.</div>"
+def build_page(t: pd.DataFrame, run_date: str, css: str, note: str = "", session_label: str = "8:00 AM CT morning scan") -> str:
+    """Use precisely the old page wrapper and original scanner.report.CSS."""
+    n_choch = int((t["status"] == "CHOCH").sum()) if not t.empty else 0
+    body = html_section(t) if not t.empty else "<div class='kv'>No futures data this morning.</div>"
+    now = dt.datetime.now(dt.timezone.utc)
     return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
             f"<title>RPT Futures — {run_date}</title><style>{css}</style></head><body><div class='wrap'>"
-            f"<h1>RPT Futures</h1><div class='sub'>{session_label} · {run_date} · {len(t)} TopStep markets · {n_play} in play · "
+            f"<h1>RPT Futures</h1><div class='sub'>{H.escape(session_label)} · {run_date} · 4 Topstep micro markets · {n_choch} recent CHOCH · "
             f"<a class='dl' href='futures_watchlist.txt' download='RPT Futures {run_date}.txt'>⬇ Download watchlist</a> · "
-            f"<a class='dl' href='index.html'>→ Stock board</a></div>"
-            + body +
-            "<h2>How to read it</h2><div class='kv'>A market is IN PLAY when its 20-day ATR is at least 30% above its 100-day ATR and price is leaving its range (a close within 0.5% of a 50-day high / low, or 3 of the last 5 closes outside the prior 20-day range). Waking = score 40+, partway there; volume raises the score but is not required. Side = price vs a rising or falling 20-day; trade with it. vs 50 is the stretch from the 50-day in ATR, same gauge as the stock readout. Tap a market to open the micro in TradingView.</div>"
-            + (f"<div class='foot'>{note}</div>" if note else "") +
-            f"<div class='foot'>RPT Scanner · futures board · generated {dt.datetime.utcnow():%Y-%m-%d %H:%M} UTC</div></div></body></html>")
+            f"<a class='dl' href='index.html'>→ Stock board</a></div>" + body +
+            "<h2>How to read it</h2><div class='kv'>Higher scores mean better alignment with the RPT countertrend-failure thesis, not higher proven win rates. "
+            "Strong 65 trend + price persistence set the bias; WATCH means countertrend pivots are confirmed; CHOCH means the first countertrend structural level broke on a completed 30m candle. "
+            "20 SMA curling back with the trend adds points, but does not gate a CHOCH. Inspect 2m for execution; use the 10m 20 SMA for trade management. "
+            "Times and possible feed delays are displayed. Yahoo full-size continuous futures proxy the micro TradingView charts.</div>" +
+            (f"<div class='foot'>{H.escape(note)}</div>" if note else "") +
+            f"<div class='foot'>RPT Scanner · futures board · generated {now:%Y-%m-%d %H:%M} UTC</div></div></body></html>")
 
 
 def build_watchlist(t: pd.DataFrame) -> str:
-    """TradingView import format: IN PLAY, WAKING, then the rest, each in score order."""
+    """Unchanged TradingView comma-separated import format, four markets only."""
     if t.empty:
         return "###FUTURES"
-    parts = []
-    t = t[t["direction"] != "no data"]
-    for head, mask in (("IN PLAY", t["in_play"]), ("WAKING", (~t["in_play"]) & (t["score"] >= 40)), ("QUIET", (~t["in_play"]) & (t["score"] < 40))):
+    groups = (("CHOCH", t["status"] == "CHOCH"), ("WATCH", t["status"] == "WATCH"),
+              ("TREND", t["status"].isin(["ALIGNED", "TREND"])),
+              ("QUIET", t["status"].isin(["CHOP", "NO DATA"])))
+    out = []
+    for name, mask in groups:
         sub = t[mask]
-        if sub.empty:
-            continue
-        parts.append(f"###{head}")
-        parts.extend(sub["tv"].tolist())
-    return ",".join(parts)
+        if not sub.empty:
+            out.append("###" + name)
+            out.extend(sub["tv"].tolist())
+    return ",".join(out)
 
 
 def discord_post(webhook, t: pd.DataFrame, page_url: str, run_date: str):
-    """Second embed of the night: the top six futures."""
-    import datetime as dt, requests
-    if not webhook or t.empty:
-        return
-    nice = dt.datetime.strptime(run_date, "%Y-%m-%d").strftime("%b %-d")
-    top = t[t["direction"] != "no data"].head(6)
-    n_play = int(t["in_play"].sum())
-    color = 0xff9800 if n_play else 0x8a8f98
+    """Same Discord embed and blue markdown chart links, now all four ranked."""
+    import requests
+    if not webhook or t.empty or not (t["status"] != "NO DATA").any():
+        return False
+    when = dt.datetime.strptime(run_date, "%Y-%m-%d").strftime("%b %d").replace(" 0", " ")
+    n_choch = int((t["status"] == "CHOCH").sum())
+    color = 0xff9800 if n_choch else 0x8a8f98
     lines = []
-    for _, r in top.iterrows():
-        flag = "🔥" if r["in_play"] else ("◐" if r["score"] >= 40 else "·")
-        side = {"long": "LONG", "short": "SHORT"}.get(r["direction"], "flat")
-        tick = r["tv"].split(":")[1]
-        link = f"https://www.tradingview.com/chart/?symbol={r['tv']}"
-        # one heading line per market (Discord's largest embed text), numbers on the line below
-        lines.append(f"### {flag} [{tick}]({link}) {r['name']} · {side}\nATR x{r['vol_ratio']:.2f} · {r['chg20']:+.1f}% over 20d · {r['ext_atr50']:+.1f} ATR vs 50")
-    embed = {"title": f"RPT Futures · {nice} · {n_play} in play", "url": page_url or None, "color": color,
-             "description": "🔥 in play (ATR expanding + leaving its range) · ◐ waking · · quiet\n" + "\n".join(lines),
-             "footer": {"text": "Trade the side, not the market · tap the title for the full board"}}
-    try:
-        requests.post(webhook, json={"embeds": [embed]}, timeout=20)
-    except Exception as ex:
-        print("futures discord post failed:", ex)
+    for i, r in t.iterrows():
+        flag = "🔥" if r["status"] == "CHOCH" else "◐" if r["status"] == "WATCH" else "·"
+        side = {"long": "LONG", "short": "SHORT"}.get(r["direction"], "FLAT")
+        score = f"{int(r['score'])}/100" if pd.notna(r["score"]) else "no data"
+        lines.append(f"### {flag} #{i+1} [{_tick(r)}]({_link(r)}) {r['name']} · {side}\n"
+                     f"Score {score} · {r['setup']}" +
+                     (f" · Data {r['asof']}" if r["asof"] else ""))
+    embed = {"title": f"RPT Futures · {when} · 4 markets ranked", "url": page_url or None,
+             "color": color,
+             "description": "🔥 recent first CHOCH · ◐ countertrend watch · · other / no data\n" + "\n".join(lines),
+             "footer": {"text": "Ranked 0–100 · Yahoo 30m data may be delayed · tap the title for the full board"}}
+    resp = requests.post(webhook, json={"embeds": [embed]}, timeout=20)
+    resp.raise_for_status()
+    return True
