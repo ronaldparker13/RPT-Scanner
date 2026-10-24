@@ -29,11 +29,14 @@ def main():
     args = ap.parse_args()
     t0 = time.time()
     os.makedirs("docs/history", exist_ok=True)
+    # Nightly stock scan must never overwrite the independent morning futures
+    # page or notify futures after stock close. Stock behavior is unchanged.
+    stock_only = os.environ.get("RPT_STOCK_ONLY", "") == "1"
 
     if args.demo:
         universe = D.demo_universe()
         bars = D.demo_bars(universe)
-        fut_bars = D.demo_futures()
+        fut_bars = {} if stock_only else D.demo_futures()
         exchanges = {}
         note = "DEMO DATA — synthetic bars, for layout only."
     else:
@@ -42,7 +45,7 @@ def main():
             universe = universe.sort_values("market_cap", ascending=False).head(args.limit)
         print(f"universe: {len(universe)} stocks ≥ ${C.MIN_MARKET_CAP/1e9:.0f}B")
         bars = D.fetch_bars(list(universe["symbol"]) + D.BENCHMARKS + D.SECTOR_ETFS)
-        fut_bars = D.fetch_bars([f[0] for f in F.FUTURES], days=400, batch=30)
+        fut_bars = {} if stock_only else D.fetch_bars([f[0] for f in F.FUTURES], days=400, batch=30)
         print(f"bars: {len(bars)} symbols in {time.time()-t0:.0f}s")
         exchanges = {}
         note = ""
@@ -78,13 +81,14 @@ def main():
     session_label = "After the close" if after_close else f"Intraday snapshot {now_ct:%H:%M} CT"
     if args.demo:
         session_label = "After the close"
-    fut = F.in_play_table(fut_bars)
+    fut = pd.DataFrame() if stock_only else F.in_play_table(fut_bars)
     page = build_html(reg, groups, setups, universe, run_date, note, session_label)
     fut_date = F.latest_date(fut) or run_date
-    with open("docs/futures.html", "w", encoding="utf-8") as f:
-        f.write(F.build_page(fut, fut_date, CSS, note, session_label))
-    with open("docs/futures_watchlist.txt", "w", encoding="utf-8") as f:
-        f.write(F.build_watchlist(fut))
+    if not stock_only:
+        with open("docs/futures.html", "w", encoding="utf-8") as f:
+            f.write(F.build_page(fut, fut_date, CSS, note, session_label))
+        with open("docs/futures_watchlist.txt", "w", encoding="utf-8") as f:
+            f.write(F.build_watchlist(fut))
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(page)
     with open(f"docs/history/{run_date}.html", "w", encoding="utf-8") as f:
