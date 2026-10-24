@@ -15,6 +15,8 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
       - run: python run.py
+        env:
+          RPT_STOCK_ONLY: "1" # preserve stock run; leave morning futures files alone
       - name: commit the page
         run: |
           git config user.name "rpt-scanner-bot"
